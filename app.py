@@ -2,6 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 from PIL import Image
 import json
+import re  # We use this for "Regular Expressions" to find the JSON
 
 # --- CONFIGURATION ---
 try:
@@ -10,26 +11,46 @@ try:
 except:
     st.error("API Key not found. Please set it in Streamlit Secrets.")
 
+# --- HELPER: FIND THE JSON ---
+def extract_json(text_response):
+    # This pattern finds the largest block of text starting with '{' and ending with '}'
+    pattern = r"\{[\s\S]*\}"
+    match = re.search(pattern, text_response)
+    if match:
+        return match.group(0)
+    return text_response
+
 def analyze_image(image):
-    # We use the specific configuration to FORCE JSON output
-    # This prevents the AI from adding conversational text that breaks the app
+    # 1. FORCE JSON OUTPUT
     generation_config = {
-        "temperature": 0.1,
+        "temperature": 0.0,         # 0.0 means "be exact, don't be creative"
         "response_mime_type": "application/json"
     }
     
+    # 2. DISABLE SAFETY FILTERS (Crucial for chemical ingredients)
+    # We turn off blocks for "Harmful" content because chemical names can trigger false positives
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+    
     model = genai.GenerativeModel(
         'gemini-1.5-flash',
-        generation_config=generation_config
+        generation_config=generation_config,
+        safety_settings=safety_settings
     )
     
     prompt = """
-    Analyze the ingredient label in this image.
+    Analyze the ingredient label in this image. 
+    If the image is blurry, do your best to guess the words based on context.
+    
     1. Identify the First 3 ingredients listed (Top by Mass).
     2. Classify EVERY ingredient into 'Simple_Processed' or 'Ultra_Processed'.
     3. Count total ingredients and calculate percentages.
     
-    Output strictly in this JSON structure:
+    Return STRICT JSON. No markdown, no "Here is the result". Just the JSON:
     {
         "top_3_by_mass": ["item1", "item2", "item3"],
         "stats": {
@@ -56,7 +77,6 @@ def analyze_image(image):
 st.set_page_config(page_title="Ingredient Scanner", page_icon="🥦")
 
 st.title("🥦 UPF Scanner")
-st.info("Tip: Use your phone's native camera to take a clear, focused photo first, then upload it here.")
 
 uploaded_file = st.file_uploader("Choose a photo of ingredients", type=['jpg', 'jpeg', 'png', 'webp'])
 
@@ -66,52 +86,43 @@ if uploaded_file is not None:
     
     if st.button("Analyze Ingredients"):
         
-        # Run Analysis
         raw_response = analyze_image(image)
         
-        # --- DEBUGGER: This helps you see what is wrong ---
-        with st.expander("🛠️ View Raw AI Response (Debug)"):
-            st.code(raw_response)
+        # --- ROBUST PARSING ---
+        # 1. Try to find the JSON hidden in the text
+        cleaned_json = extract_json(raw_response)
         
         try:
-            # Parse JSON
-            data = json.loads(raw_response)
+            data = json.loads(cleaned_json)
             
             # --- SHOW RESULTS ---
             st.divider()
             
-            # 1. The Verdict
+            # verdict
             st.subheader("💡 Verdict")
             st.success(data['verdict'])
             
-            # 2. Scorecard
+            # scorecard
             col1, col2 = st.columns(2)
             col1.metric("Simple", f"{data['stats']['simple_pct']}%")
             col2.metric("Ultra Processed", f"{data['stats']['ultra_processed_pct']}%")
             
             st.progress(data['stats']['simple_pct'] / 100)
             
-            # 3. Mass Analysis
-            st.subheader("⚖️ Heaviest Ingredients")
-            st.caption("(Top 3 by weight)")
+            # lists
+            st.subheader("⚖️ Top 3 by Mass")
             for i, item in enumerate(data['top_3_by_mass'], 1):
                 st.write(f"**{i}.** {item}")
                 
-            # 4. The Bad List
-            with st.expander("See Ultra-Processed Ingredients"):
-                if data['lists']['ultra']:
-                    for item in data['lists']['ultra']:
-                        st.write(f"- 🔴 {item}")
-                else:
-                    st.write("None found!")
+            with st.expander("🔴 See Ultra-Processed List"):
+                for item in data['lists']['ultra']:
+                    st.write(f"- {item}")
 
-            # 5. The Good List
-            with st.expander("See Simple Ingredients"):
+            with st.expander("🟢 See Simple List"):
                 for item in data['lists']['simple']:
-                    st.write(f"- 🟢 {item}")
+                    st.write(f"- {item}")
                     
         except json.JSONDecodeError:
-            st.error("⚠️ The AI saw the text but formatted it poorly.")
-            st.write("Please look at the 'View Raw AI Response' box above to see what happened.")
-        except Exception as e:
-            st.error(f"Something went wrong: {e}")
+            st.error("⚠️ AI Error: The response was blocked or incomplete.")
+            with st.expander("See what the AI actually said (Debug)"):
+                st.text(raw_response)
