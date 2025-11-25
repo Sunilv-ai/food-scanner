@@ -11,15 +11,25 @@ except:
     st.error("API Key not found. Please set it in Streamlit Secrets.")
 
 def analyze_image(image):
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # We use the specific configuration to FORCE JSON output
+    # This prevents the AI from adding conversational text that breaks the app
+    generation_config = {
+        "temperature": 0.1,
+        "response_mime_type": "application/json"
+    }
+    
+    model = genai.GenerativeModel(
+        'gemini-1.5-flash',
+        generation_config=generation_config
+    )
     
     prompt = """
-    Look at the ingredient label in this image.
+    Analyze the ingredient label in this image.
     1. Identify the First 3 ingredients listed (Top by Mass).
     2. Classify EVERY ingredient into 'Simple_Processed' or 'Ultra_Processed'.
     3. Count total ingredients and calculate percentages.
     
-    Return ONLY this JSON:
+    Output strictly in this JSON structure:
     {
         "top_3_by_mass": ["item1", "item2", "item3"],
         "stats": {
@@ -48,24 +58,24 @@ st.set_page_config(page_title="Ingredient Scanner", page_icon="🥦")
 st.title("🥦 UPF Scanner")
 st.info("Tip: Use your phone's native camera to take a clear, focused photo first, then upload it here.")
 
-# --- CHANGE IS HERE: REPLACED CAMERA INPUT WITH FILE UPLOADER ---
 uploaded_file = st.file_uploader("Choose a photo of ingredients", type=['jpg', 'jpeg', 'png', 'webp'])
 
 if uploaded_file is not None:
-    # Display the image to the user
     image = Image.open(uploaded_file)
     st.image(image, caption="Uploaded Label", use_container_width=True)
     
-    # Add a button so the user can control when to start the AI (saves API calls)
     if st.button("Analyze Ingredients"):
         
         # Run Analysis
-        json_text = analyze_image(image)
+        raw_response = analyze_image(image)
+        
+        # --- DEBUGGER: This helps you see what is wrong ---
+        with st.expander("🛠️ View Raw AI Response (Debug)"):
+            st.code(raw_response)
         
         try:
-            # Clean Code block markers if AI adds them
-            clean_json = json_text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(clean_json)
+            # Parse JSON
+            data = json.loads(raw_response)
             
             # --- SHOW RESULTS ---
             st.divider()
@@ -79,7 +89,6 @@ if uploaded_file is not None:
             col1.metric("Simple", f"{data['stats']['simple_pct']}%")
             col2.metric("Ultra Processed", f"{data['stats']['ultra_processed_pct']}%")
             
-            # Visual Bar
             st.progress(data['stats']['simple_pct'] / 100)
             
             # 3. Mass Analysis
@@ -101,5 +110,8 @@ if uploaded_file is not None:
                 for item in data['lists']['simple']:
                     st.write(f"- 🟢 {item}")
                     
-        except:
-            st.error("Could not read the label. Please try uploading a clearer photo.")
+        except json.JSONDecodeError:
+            st.error("⚠️ The AI saw the text but formatted it poorly.")
+            st.write("Please look at the 'View Raw AI Response' box above to see what happened.")
+        except Exception as e:
+            st.error(f"Something went wrong: {e}")
