@@ -37,7 +37,7 @@ def analyze_image(image):
     ]
     
     model = genai.GenerativeModel(
-        'gemini-1.5-flash',
+        'gemini-1.5-flash-latest',
         generation_config=generation_config,
         safety_settings=safety_settings
     )
@@ -126,3 +126,4 @@ if uploaded_file is not None:
             st.error("⚠️ AI Error: The response was blocked or incomplete.")
             with st.expander("See what the AI actually said (Debug)"):
                 st.text(raw_response)
+
