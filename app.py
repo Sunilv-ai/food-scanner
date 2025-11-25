@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 from PIL import Image
 import json
-import re  # We use this for "Regular Expressions" to find the JSON
+import re
 
 # --- CONFIGURATION ---
 try:
@@ -13,7 +13,6 @@ except:
 
 # --- HELPER: FIND THE JSON ---
 def extract_json(text_response):
-    # This pattern finds the largest block of text starting with '{' and ending with '}'
     pattern = r"\{[\s\S]*\}"
     match = re.search(pattern, text_response)
     if match:
@@ -21,14 +20,12 @@ def extract_json(text_response):
     return text_response
 
 def analyze_image(image):
-    # 1. FORCE JSON OUTPUT
     generation_config = {
-        "temperature": 0.0,         # 0.0 means "be exact, don't be creative"
+        "temperature": 0.0,
         "response_mime_type": "application/json"
     }
     
-    # 2. DISABLE SAFETY FILTERS (Crucial for chemical ingredients)
-    # We turn off blocks for "Harmful" content because chemical names can trigger false positives
+    # We turn off safety filters to prevent chemical names from being blocked
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -36,21 +33,20 @@ def analyze_image(image):
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
     
+    # USING THE CORRECT MODERN MODEL
     model = genai.GenerativeModel(
-        'gemini-pro-vision',
+        'gemini-1.5-flash',
         generation_config=generation_config,
         safety_settings=safety_settings
     )
     
     prompt = """
     Analyze the ingredient label in this image. 
-    If the image is blurry, do your best to guess the words based on context.
-    
     1. Identify the First 3 ingredients listed (Top by Mass).
     2. Classify EVERY ingredient into 'Simple_Processed' or 'Ultra_Processed'.
     3. Count total ingredients and calculate percentages.
     
-    Return STRICT JSON. No markdown, no "Here is the result". Just the JSON:
+    Return STRICT JSON:
     {
         "top_3_by_mass": ["item1", "item2", "item3"],
         "stats": {
@@ -78,6 +74,10 @@ st.set_page_config(page_title="Ingredient Scanner", page_icon="🥦")
 
 st.title("🥦 UPF Scanner")
 
+# --- DEBUG INFO: This tells us if the server actually updated ---
+st.caption(f"System Version: {genai.__version__}") 
+# If this number is LESS than 0.7.0, the update failed.
+
 uploaded_file = st.file_uploader("Choose a photo of ingredients", type=['jpg', 'jpeg', 'png', 'webp'])
 
 if uploaded_file is not None:
@@ -87,29 +87,21 @@ if uploaded_file is not None:
     if st.button("Analyze Ingredients"):
         
         raw_response = analyze_image(image)
-        
-        # --- ROBUST PARSING ---
-        # 1. Try to find the JSON hidden in the text
         cleaned_json = extract_json(raw_response)
         
         try:
             data = json.loads(cleaned_json)
             
-            # --- SHOW RESULTS ---
             st.divider()
-            
-            # verdict
             st.subheader("💡 Verdict")
             st.success(data['verdict'])
             
-            # scorecard
             col1, col2 = st.columns(2)
             col1.metric("Simple", f"{data['stats']['simple_pct']}%")
             col2.metric("Ultra Processed", f"{data['stats']['ultra_processed_pct']}%")
             
             st.progress(data['stats']['simple_pct'] / 100)
             
-            # lists
             st.subheader("⚖️ Top 3 by Mass")
             for i, item in enumerate(data['top_3_by_mass'], 1):
                 st.write(f"**{i}.** {item}")
@@ -124,7 +116,5 @@ if uploaded_file is not None:
                     
         except json.JSONDecodeError:
             st.error("⚠️ AI Error: The response was blocked or incomplete.")
-            with st.expander("See what the AI actually said (Debug)"):
+            with st.expander("Debug View"):
                 st.text(raw_response)
-
-
