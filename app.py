@@ -1,94 +1,75 @@
 import streamlit as st
-import google.generativeai as genai
-from PIL import Image
+import requests
 import json
-import re
+import base64
+from PIL import Image
+from io import BytesIO
 
 # --- CONFIGURATION ---
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
+    API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
     st.error("API Key not found. Please set it in Streamlit Secrets.")
+    st.stop()
 
-def extract_json(text_response):
-    # Extracts text between the first '{' and the last '}'
-    pattern = r"\{[\s\S]*\}"
-    match = re.search(pattern, text_response)
-    if match:
-        return match.group(0)
-    return text_response
+def analyze_image_direct(image):
+    # 1. Convert Image to Base64 (Google needs text, not pixels)
+    buffered = BytesIO()
+    image.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
 
-def analyze_image(image):
-    generation_config = {
-        "temperature": 0.0,
-        "response_mime_type": "application/json"
-    }
-    
-    # Disable safety filters so food chemicals don't get blocked
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-    
-    # We use 'gemini-1.5-flash'. If the Fresh Install worked, this WILL work.
-    model = genai.GenerativeModel(
-        'gemini-1.5-flash',
-        generation_config=generation_config,
-        safety_settings=safety_settings
-    )
-    
-    prompt = """
-    Analyze the image provided.
-    
-    STEP 1: CHECK FOR INGREDIENTS
-    Does this image contain a list of ingredients (e.g., "Ingredients: Milk, Sugar...")? 
-    Note: A "Nutrition" table (Energy, Fat, Salt) is NOT an ingredients list.
-    
-    IF NO INGREDIENTS LIST IS VISIBLE:
-    Return exactly this JSON:
-    {
-        "error": "missing_ingredients",
-        "message": "I see Nutrition Facts (Fat, Salt, etc.), but not the actual INGREDIENTS list. Please rotate the bottle to find the text starting with 'Ingredients:'."
+    # 2. The Direct Link to Gemini 1.5 Flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+
+    # 3. The Payload (The Message)
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{
+            "parts": [
+                {"text": """
+                    Analyze this image. 
+                    STEP 1: Check if this is an INGREDIENTS list. If it's a Nutrition Table (Fat, Salt), return error.
+                    
+                    If Ingredients found:
+                    1. Identify top 3 by mass.
+                    2. Classify Simple vs Ultra Processed.
+                    3. JSON format ONLY:
+                    {
+                        "top_3_by_mass": ["item1", "item2"],
+                        "stats": {"simple_pct": 0, "ultra_processed_pct": 0},
+                        "lists": {"simple": [], "ultra": []},
+                        "verdict": "summary",
+                        "error": "none"
+                    }
+                    If wrong image, return: {"error": "missing_ingredients"}
+                """},
+                {"inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": img_str
+                }}
+            ]
+        }],
+        "generationConfig": {
+            "response_mime_type": "application/json"
+        }
     }
 
-    IF INGREDIENTS ARE FOUND:
-    1. Identify the First 3 ingredients listed (Top by Mass).
-    2. Classify EVERY ingredient into 'Simple_Processed' or 'Ultra_Processed'.
-    3. Count total ingredients and calculate percentages.
-    
-    Return STRICT JSON:
-    {
-        "top_3_by_mass": ["item1", "item2", "item3"],
-        "stats": {
-            "total_count": 0,
-            "simple_pct": 0,
-            "ultra_processed_pct": 0
-        },
-        "lists": {
-            "simple": ["item", "item"],
-            "ultra": ["item", "item"]
-        },
-        "verdict": "One sentence summary."
-    }
-    """
-    
-    with st.spinner("🤖 AI is reading the label..."):
-        try:
-            response = model.generate_content([prompt, image])
-            return response.text
-        except Exception as e:
-            return f"Error: {e}"
+    # 4. Send the Request
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        
+        # Check if Google blocked it
+        if response.status_code != 200:
+            return f"Error {response.status_code}: {response.text}"
+            
+        return response.json()
+    except Exception as e:
+        return f"Connection Error: {e}"
 
 # --- APP INTERFACE ---
 st.set_page_config(page_title="Ingredient Scanner", page_icon="🥦")
-st.title("🥦 UPF Scanner")
-st.info("Tip: Don't photograph the 'Nutrition' table (Fat/Salt). Photograph the **text paragraph** that lists ingredients.")
-
-# Debug: Print version to confirm the fix
-st.caption(f"System Version: {genai.__version__} (Should be 0.8.3+)")
+st.title("🥦 UPF Scanner (Direct Mode)")
+st.info("Tip: Ensure you photograph the 'Ingredients' paragraph, not the Nutrition table.")
 
 uploaded_file = st.file_uploader("Choose photo", type=['jpg', 'jpeg', 'png', 'webp'])
 
@@ -97,35 +78,42 @@ if uploaded_file is not None:
     st.image(image, caption="Uploaded Label", use_container_width=True)
     
     if st.button("Analyze Ingredients"):
-        raw_response = analyze_image(image)
-        cleaned_json = extract_json(raw_response)
+        with st.spinner("Talking to Gemini directly..."):
+            result = analyze_image_direct(image)
         
+        # --- PARSING THE DIRECT RESPONSE ---
         try:
-            data = json.loads(cleaned_json)
-            
-            # CHECK FOR LOGICAL ERROR (Wrong image side)
-            if "error" in data and data["error"] == "missing_ingredients":
-                st.warning("⚠️ " + data["message"])
+            # If it's a string, it's an error message
+            if isinstance(result, str):
+                st.error(result)
             else:
-                # SUCCESS
-                st.divider()
-                st.subheader("💡 Verdict")
-                st.success(data['verdict'])
+                # Extract the text from the complex Google JSON structure
+                text_content = result['candidates'][0]['content']['parts'][0]['text']
+                data = json.loads(text_content)
                 
-                col1, col2 = st.columns(2)
-                col1.metric("Simple", f"{data['stats']['simple_pct']}%")
-                col2.metric("Ultra Processed", f"{data['stats']['ultra_processed_pct']}%")
-                st.progress(data['stats']['simple_pct'] / 100)
-                
-                st.subheader("⚖️ Heaviest Ingredients")
-                for i, item in enumerate(data['top_3_by_mass'], 1):
-                    st.write(f"**{i}.** {item}")
+                # LOGIC HANDLERS
+                if data.get("error") == "missing_ingredients":
+                    st.warning("⚠️ I see Nutrition Facts, but not Ingredients. Please rotate the bottle.")
+                else:
+                    # SUCCESS DISPLAY
+                    st.divider()
+                    st.subheader("💡 Verdict")
+                    st.success(data['verdict'])
                     
-                with st.expander("🔴 See Ultra-Processed List"):
-                    for item in data['lists']['ultra']:
-                        st.write(f"- {item}")
-        
-        except json.JSONDecodeError:
-            st.error("⚠️ AI Error.")
-            with st.expander("Debug View"):
-                st.write(raw_response)
+                    col1, col2 = st.columns(2)
+                    col1.metric("Simple", f"{data['stats']['simple_pct']}%")
+                    col2.metric("Ultra Processed", f"{data['stats']['ultra_processed_pct']}%")
+                    st.progress(data['stats']['simple_pct'] / 100)
+                    
+                    st.subheader("⚖️ Heaviest Ingredients")
+                    for i, item in enumerate(data['top_3_by_mass'], 1):
+                        st.write(f"**{i}.** {item}")
+                        
+                    with st.expander("🔴 See Ultra-Processed List"):
+                        for item in data['lists']['ultra']:
+                            st.write(f"- {item}")
+                            
+        except Exception as e:
+            st.error("Could not parse the response.")
+            with st.expander("Debug Info"):
+                st.write(result)
